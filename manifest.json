@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.williamjohndavisiii.heliotrope",
+  "name": "Heliotrope",
+  "version": "1.0.0",
+  "author": "William John Davis III",
+  "description": "A night light that follows the sun. A bar icon and dropdown with a temperature slider and a sunrise, sunset, or custom schedule.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Heliotrope",
+    "description": "Bar icon and dropdown for the night light and its schedule.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showIcon": true
+    },
+    "schema": [
+      {
+        "key": "showIcon",
+        "type": "boolean",
+        "label": "Show icon",
+        "description": "Turn off if you've added Indicator.qml to the omarchy.indicators items instead.",
+        "defaultValue": true
+      }
+    ]
+  }
+}

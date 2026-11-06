@@ -1,0 +1,202 @@
+// Run with: TZ=America/New_York node tests/model.test.js
+// Pass SUN_FIXTURE=<json file> to also compare sun times with a reference list
+// of { "date": "YYYY-MM-DD", "sunrise": ms, "sunset": ms } entries.
+const assert = require("assert")
+const fs = require("fs")
+const path = require("path")
+const Model = require(path.join(__dirname, "..", "Model.js"))
+
+const at = (y, mo, d, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime()
+const place = { latitude: 40.71, longitude: -74.01, source: "custom", label: "" } // New York, for TZ above
+const settings = (patch) => Model.normalizeSettings(Object.assign(Model.defaultSettings(), patch))
+const test = (name, run) => { run(); console.log("ok - " + name) }
+
+test("sun schedule follows the day", () => {
+  const s = settings({ mode: "sun" })
+  const times = Model.sunTimes(at(2026, 11, 5, 12), place.latitude, place.longitude)
+  const before = Model.scheduleAt(s, place, times.sunrise - 60000)
+  assert.strictEqual(before.on, true)
+  assert.strictEqual(before.next, times.sunrise)
+  const day = Model.scheduleAt(s, place, times.sunrise + 60000)
+  assert.strictEqual(day.on, false)
+  assert.strictEqual(day.next, times.sunset)
+  const night = Model.scheduleAt(s, place, times.sunset + 60000)
+  assert.strictEqual(night.on, true)
+  assert.ok(night.next > at(2026, 11, 6) && night.next < at(2026, 11, 6, 12), "next is tomorrow's sunrise")
+})
+
+test("custom hours across midnight", () => {
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00" })
+  assert.deepStrictEqual(Model.scheduleAt(s, place, at(2026, 11, 5, 20, 59)), { on: false, next: at(2026, 11, 5, 21) })
+  assert.deepStrictEqual(Model.scheduleAt(s, place, at(2026, 11, 5, 21)), { on: true, next: at(2026, 11, 6, 7) })
+  assert.deepStrictEqual(Model.scheduleAt(s, place, at(2026, 11, 6, 3)), { on: true, next: at(2026, 11, 6, 7) })
+  assert.deepStrictEqual(Model.scheduleAt(s, place, at(2026, 11, 6, 7)), { on: false, next: at(2026, 11, 6, 21) })
+})
+
+test("custom hours within a day", () => {
+  const s = settings({ mode: "custom", onTime: "09:00", offTime: "17:00" })
+  assert.deepStrictEqual(Model.scheduleAt(s, place, at(2026, 11, 5, 8)), { on: false, next: at(2026, 11, 5, 9) })
+  assert.deepStrictEqual(Model.scheduleAt(s, place, at(2026, 11, 5, 12)), { on: true, next: at(2026, 11, 5, 17) })
+  assert.deepStrictEqual(Model.scheduleAt(s, place, at(2026, 11, 5, 18)), { on: false, next: at(2026, 11, 6, 9) })
+})
+
+test("matching custom hours never turn on", () => {
+  const s = settings({ mode: "custom", onTime: "09:00", offTime: "09:00" })
+  const now = at(2026, 11, 5, 9)
+  assert.strictEqual(Model.scheduleAt(s, place, now).on, false)
+})
+
+test("main switch during a schedule holds until the next change", () => {
+  const now = at(2026, 11, 5, 22)
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00" })
+  const offPatch = Model.switchPatch(s, place, now, false)
+  assert.deepStrictEqual(offPatch.override, { on: false, until: at(2026, 11, 6, 7) })
+
+  const held = settings(Object.assign({}, s, offPatch))
+  assert.deepStrictEqual(Model.desiredState(held, place, now), { on: false, until: at(2026, 11, 6, 7) })
+
+  // Flipping back returns to following the schedule.
+  const backPatch = Model.switchPatch(held, place, now, true)
+  assert.strictEqual(backPatch.override, null)
+
+  // Once the hold ends, the schedule leads again, and it says off at 7:00.
+  assert.strictEqual(Model.desiredState(held, place, at(2026, 11, 6, 7)).on, false)
+  assert.strictEqual(Model.desiredState(held, place, at(2026, 11, 6, 21)).on, true)
+})
+
+test("turning on during the off hours holds until they end", () => {
+  const now = at(2026, 11, 5, 10)
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00" })
+  const patch = Model.switchPatch(s, place, now, true)
+  assert.deepStrictEqual(patch.override, { on: true, until: at(2026, 11, 5, 21) })
+  const held = settings(Object.assign({}, s, patch))
+  // At 21:00 the hold ends and the schedule keeps it on, with no gap.
+  assert.strictEqual(Model.desiredState(held, place, at(2026, 11, 5, 20, 59)).on, true)
+  assert.strictEqual(Model.desiredState(held, place, at(2026, 11, 5, 21)).on, true)
+})
+
+test("manual mode has no end time and keeps the current state", () => {
+  const s = settings({ mode: "sun" })
+  const patch = Model.modePatch(s, "manual", true)
+  const manual = settings(Object.assign({}, s, patch))
+  assert.deepStrictEqual(Model.desiredState(manual, place, at(2026, 11, 5, 12)), { on: true, until: 0 })
+  const off = settings(Object.assign({}, manual, Model.switchPatch(manual, place, at(2026, 11, 5, 12), false)))
+  assert.deepStrictEqual(Model.desiredState(off, place, at(2026, 11, 5, 12)), { on: false, until: 0 })
+})
+
+test("changing modes drops any hold", () => {
+  const s = settings({ mode: "sun", override: { on: true, until: at(2030, 1, 1) } })
+  assert.strictEqual(Model.modePatch(s, "custom", true).override, null)
+  assert.strictEqual(Model.modePatch(s, "manual", true).override, null)
+})
+
+test("bad settings fall back field by field", () => {
+  const s = Model.normalizeSettings({ mode: "nope", temperature: 99999, onTime: "25:00", offTime: "6:30", latitude: 200, override: { on: "yes" } })
+  const d = Model.defaultSettings()
+  assert.strictEqual(s.mode, d.mode)
+  assert.strictEqual(s.temperature, Model.MAX_TEMP)
+  assert.strictEqual(s.onTime, d.onTime)
+  assert.strictEqual(s.offTime, "06:30")
+  assert.strictEqual(s.latitude, d.latitude)
+  assert.strictEqual(s.override, null)
+  assert.deepStrictEqual(Model.normalizeSettings("garbage"), d)
+  assert.deepStrictEqual(Model.normalizeSettings(null), d)
+})
+
+test("half a location in the settings counts as none", () => {
+  assert.strictEqual(settings({ latitude: 45 }).latitude, null)
+  assert.strictEqual(settings({ latitude: 45, longitude: 500 }).latitude, null)
+})
+
+test("nothing ships with a location", () => {
+  const d = Model.defaultSettings()
+  assert.strictEqual(d.latitude, null)
+  assert.strictEqual(d.longitude, null)
+})
+
+test("typed coordinates", () => {
+  assert.deepStrictEqual(Model.parseCoordinates(" 52.52, 13.40 "), { latitude: 52.52, longitude: 13.4 })
+  assert.deepStrictEqual(Model.parseCoordinates("-33.9 151.2"), { latitude: -33.9, longitude: 151.2 })
+  assert.strictEqual(Model.parseCoordinates("91, 0"), null)
+  assert.strictEqual(Model.parseCoordinates("Berlin"), null)
+  assert.strictEqual(Model.parseCoordinates(""), null)
+})
+
+test("weather location needs coordinates", () => {
+  assert.strictEqual(Model.weatherLocation('{"name":"Oslo"}'), null)
+  assert.strictEqual(Model.weatherLocation("not json"), null)
+  assert.strictEqual(Model.weatherLocation('{"latitude":500,"longitude":20}'), null)
+  assert.deepStrictEqual(Model.weatherLocation('{"name":" Oslo ","latitude":"59.9","longitude":10.7}'), { latitude: 59.9, longitude: 10.7, name: "Oslo" })
+})
+
+test("time zone table gives coordinates", () => {
+  const table = "#comment\nUS\t+404251-0740023\tAmerica/New_York\nAU\t-3352+15113\tAustralia/Sydney\n"
+  const york = Model.zoneCoordinates(table, "America/New_York")
+  assert.ok(Math.abs(york.latitude - 40.714) < 0.01 && Math.abs(york.longitude + 74.006) < 0.01)
+  const sydney = Model.zoneCoordinates(table, "Australia/Sydney")
+  assert.ok(Math.abs(sydney.latitude + 33.867) < 0.01 && Math.abs(sydney.longitude - 151.217) < 0.01)
+  assert.strictEqual(Model.zoneCoordinates(table, "Mars/Base"), null)
+  assert.strictEqual(Model.zoneCoordinates(table, ""), null)
+  assert.strictEqual(Model.zoneName("/usr/share/zoneinfo/America/New_York\n"), "America/New_York")
+  assert.strictEqual(Model.zoneName("/etc/localtime"), "")
+})
+
+test("the real time zone table parses every zone", () => {
+  if (!fs.existsSync("/usr/share/zoneinfo/zone1970.tab")) return console.log("   skipped, no table")
+  const table = fs.readFileSync("/usr/share/zoneinfo/zone1970.tab", "utf8")
+  const zones = table.split("\n").filter((line) => line && line[0] !== "#").map((line) => line.split("\t")[2])
+  assert.ok(zones.length > 100)
+  for (const zone of zones) {
+    const found = Model.zoneCoordinates(table, zone)
+    assert.ok(found && Math.abs(found.latitude) <= 90 && Math.abs(found.longitude) <= 180, zone)
+  }
+})
+
+test("location prefers your own, then weather, then time zone", () => {
+  const zone = { latitude: 40, longitude: -74, zone: "America/New_York" }
+  const weather = { latitude: 59.9, longitude: 10.7, name: "Oslo" }
+  assert.strictEqual(Model.resolveLocation(settings({ latitude: 1, longitude: 2 }), weather, zone).source, "custom")
+  assert.strictEqual(Model.resolveLocation(settings({}), weather, zone).source, "weather")
+  assert.strictEqual(Model.resolveLocation(settings({}), null, zone).source, "timezone")
+  assert.strictEqual(Model.resolveLocation(settings({}), null, null), null)
+})
+
+test("sun mode with no location follows the switch", () => {
+  const now = at(2026, 11, 5, 22)
+  const s = settings({ mode: "sun" })
+  assert.deepStrictEqual(Model.desiredState(s, null, now), { on: false, until: 0 })
+  const patch = Model.switchPatch(s, null, now, true)
+  assert.deepStrictEqual(patch, { manualOn: true, override: null })
+  assert.deepStrictEqual(Model.desiredState(settings(Object.assign({}, s, patch)), null, now), { on: true, until: 0 })
+})
+
+test("custom hours don't need a location", () => {
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00" })
+  assert.strictEqual(Model.desiredState(s, null, at(2026, 11, 5, 22)).on, true)
+})
+
+test("time steps wrap around midnight", () => {
+  assert.strictEqual(Model.stepTime("23:45", 15), "00:00")
+  assert.strictEqual(Model.stepTime("00:00", -15), "23:45")
+  assert.strictEqual(Model.stepTime("nonsense", 15), "nonsense")
+})
+
+test("daylight saving changes keep custom hours on the clock", () => {
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00" })
+  // US clocks fall back on 2026-11-01 and spring forward on 2027-03-14.
+  assert.strictEqual(Model.scheduleAt(s, place, at(2026, 10, 31, 22)).next, at(2026, 11, 1, 7))
+  assert.strictEqual(Model.scheduleAt(s, place, at(2027, 3, 13, 22)).next, at(2027, 3, 14, 7))
+})
+
+if (process.env.SUN_FIXTURE) {
+  test("sun times match the reference list within a second", () => {
+    const fixture = JSON.parse(fs.readFileSync(process.env.SUN_FIXTURE, "utf8"))
+    for (const row of fixture) {
+      const [y, mo, d] = row.date.split("-").map(Number)
+      const times = Model.sunTimes(at(y, mo, d, 12), place.latitude, place.longitude)
+      assert.ok(Math.abs(times.sunrise - row.sunrise) < 1000, "sunrise " + row.date)
+      assert.ok(Math.abs(times.sunset - row.sunset) < 1000, "sunset " + row.date)
+    }
+    console.log("   compared " + fixture.length + " days")
+  })
+}

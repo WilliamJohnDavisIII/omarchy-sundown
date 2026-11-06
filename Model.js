@@ -1,0 +1,266 @@
+// Sun times and schedule rules for the night light. Plain functions with no QML,
+// so tests/model.test.js can run them under node.
+
+var MIN_TEMP = 1000
+var MAX_TEMP = 4500
+var OFF_TEMP = 6500 // Reported while off, matching omarchy-toggle-nightlight
+var FRESH_TEMP = 6000 // hyprsunset's default; only ever reported right after it starts
+var DAY_MS = 86400000
+var MODES = ["manual", "sun", "custom"]
+
+function isLatitude(value) {
+  return Number.isFinite(value) && Math.abs(value) <= 90
+}
+
+function isLongitude(value) {
+  return Number.isFinite(value) && Math.abs(value) <= 180
+}
+
+function defaultSettings() {
+  return {
+    mode: "sun",
+    temperature: 3000,
+    manualOn: false,
+    onTime: "21:00",
+    offTime: "07:00",
+    latitude: null,
+    longitude: null,
+    override: null
+  }
+}
+
+function parseTime(text) {
+  var match = /^([01]?[0-9]|2[0-3]):([0-5][0-9])$/.exec(String(text))
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null
+}
+
+function formatTime(minutes) {
+  var hours = Math.floor(minutes / 60)
+  var rest = minutes % 60
+  return (hours < 10 ? "0" : "") + hours + ":" + (rest < 10 ? "0" : "") + rest
+}
+
+function stepTime(text, deltaMinutes) {
+  var minutes = parseTime(text)
+  if (minutes === null) return text
+  return formatTime(((minutes + deltaMinutes) % 1440 + 1440) % 1440)
+}
+
+function clampTemp(kelvin) {
+  return Math.max(MIN_TEMP, Math.min(MAX_TEMP, Math.round(Number(kelvin))))
+}
+
+// Bad or missing values fall back to the defaults, one field at a time.
+function normalizeSettings(raw) {
+  var result = defaultSettings()
+  if (!raw || typeof raw !== "object") return result
+  if (MODES.indexOf(raw.mode) !== -1) result.mode = raw.mode
+  if (Number.isFinite(raw.temperature)) result.temperature = clampTemp(raw.temperature)
+  if (typeof raw.manualOn === "boolean") result.manualOn = raw.manualOn
+  if (parseTime(raw.onTime) !== null) result.onTime = formatTime(parseTime(raw.onTime))
+  if (parseTime(raw.offTime) !== null) result.offTime = formatTime(parseTime(raw.offTime))
+  if (isLatitude(raw.latitude) && isLongitude(raw.longitude)) {
+    result.latitude = raw.latitude
+    result.longitude = raw.longitude
+  }
+  var override = raw.override
+  if (override && typeof override.on === "boolean" && Number.isFinite(override.until))
+    result.override = { on: override.on, until: override.until }
+  return result
+}
+
+// "52.52, 13.40", as typed into the panel. Null when it isn't a place on Earth.
+function parseCoordinates(text) {
+  var match = /^\s*(-?\d+(?:\.\d+)?)[\s,]+(-?\d+(?:\.\d+)?)\s*$/.exec(String(text))
+  if (!match) return null
+  var latitude = Number(match[1])
+  var longitude = Number(match[2])
+  return isLatitude(latitude) && isLongitude(longitude) ? { latitude: latitude, longitude: longitude } : null
+}
+
+// Omarchy's weather.json. It often holds only a name, which is no use here,
+// because turning a name into coordinates would mean a network call.
+function weatherLocation(text) {
+  var parsed = null
+  try { parsed = JSON.parse(text) } catch (error) { parsed = null }
+  if (!parsed || typeof parsed !== "object") return null
+  var latitude = parseFloat(parsed.latitude)
+  var longitude = parseFloat(parsed.longitude)
+  if (!isLatitude(latitude) || !isLongitude(longitude)) return null
+  var name = typeof parsed.name === "string" ? parsed.name.trim().slice(0, 64) : ""
+  return { latitude: latitude, longitude: longitude, name: name }
+}
+
+// ISO 6709 as used by zone1970.tab: +404251-0740023 or +4043-07400.
+function parseIso6709(text) {
+  var match = /^([+-])(\d{2})(\d{2})(\d{2})?([+-])(\d{3})(\d{2})(\d{2})?$/.exec(String(text))
+  if (!match) return null
+  var part = function(sign, whole, minutes, seconds) {
+    var value = Number(whole) + Number(minutes) / 60 + Number(seconds || 0) / 3600
+    return sign === "-" ? -value : value
+  }
+  return { latitude: part(match[1], match[2], match[3], match[4]), longitude: part(match[5], match[6], match[7], match[8]) }
+}
+
+// The target of /etc/localtime, without the zoneinfo folder.
+function zoneName(path) {
+  var match = /zoneinfo\/([A-Za-z0-9_+\/-]+)\s*$/.exec(String(path))
+  return match ? match[1] : ""
+}
+
+// Where the system's time zone says we are, from the system's own table. Only
+// roughly right, since it's the zone's main city, but it needs no network.
+function zoneCoordinates(table, zone) {
+  if (!zone) return null
+  var lines = String(table).split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var columns = lines[i].split("\t")
+    if (columns[2] !== zone) continue
+    var place = parseIso6709(columns[1])
+    return place ? { latitude: place.latitude, longitude: place.longitude, zone: zone } : null
+  }
+  return null
+}
+
+// Your own coordinates, then Omarchy's weather location, then the time zone.
+// Null means Sun mode has nothing to go on.
+function resolveLocation(settings, weather, zone) {
+  if (settings.latitude !== null && settings.longitude !== null)
+    return { latitude: settings.latitude, longitude: settings.longitude, source: "custom", label: "" }
+  if (weather) return { latitude: weather.latitude, longitude: weather.longitude, source: "weather", label: weather.name }
+  if (zone) return { latitude: zone.latitude, longitude: zone.longitude, source: "timezone", label: zone.zone }
+  return null
+}
+
+function radians(degrees) { return degrees * Math.PI / 180 }
+function degrees(value) { return value * 180 / Math.PI }
+
+// NOAA solar equations: minutes after 00:00 UTC on the given date.
+function sunMinutesUtc(year, month, day, latitude, longitude, rising) {
+  var julianDay = Date.UTC(year, month, day) / DAY_MS + 2440587.5
+  var minutes = 720
+  for (var i = 0; i < 3; i++) {
+    var t = (julianDay + minutes / 1440 - 2451545) / 36525
+    var l0 = (280.46646 + t * (36000.76983 + t * 0.0003032)) % 360
+    var m = radians(357.52911 + t * (35999.05029 - 0.0001537 * t))
+    var e = 0.016708634 - t * (0.000042037 + 0.0000001267 * t)
+    var center = Math.sin(m) * (1.914602 - t * (0.004817 + 0.000014 * t))
+      + Math.sin(2 * m) * (0.019993 - 0.000101 * t)
+      + Math.sin(3 * m) * 0.000289
+    var omega = radians(125.04 - 1934.136 * t)
+    var sunLongitude = radians(l0 + center - 0.00569 - 0.00478 * Math.sin(omega))
+    var obliquity = radians(23
+      + (26 + (21.448 - t * (46.815 + t * (0.00059 - t * 0.001813))) / 60) / 60
+      + 0.00256 * Math.cos(omega))
+    var declination = Math.asin(Math.sin(obliquity) * Math.sin(sunLongitude))
+    var y = Math.pow(Math.tan(obliquity / 2), 2)
+    var l0r = radians(l0)
+    var equationOfTime = 4 * degrees(
+      y * Math.sin(2 * l0r)
+      - 2 * e * Math.sin(m)
+      + 4 * e * y * Math.sin(m) * Math.cos(2 * l0r)
+      - 0.5 * y * y * Math.sin(4 * l0r)
+      - 1.25 * e * e * Math.sin(2 * m))
+    var lat = radians(latitude)
+    var cosHourAngle = (Math.cos(radians(90.833)) - Math.sin(lat) * Math.sin(declination))
+      / (Math.cos(lat) * Math.cos(declination))
+    var hourAngle = degrees(Math.acos(Math.max(-1, Math.min(1, cosHourAngle))))
+    var noon = 720 - 4 * longitude - equationOfTime
+    minutes = rising ? noon - 4 * hourAngle : noon + 4 * hourAngle
+  }
+  return minutes
+}
+
+function sunTimes(nowMs, latitude, longitude) {
+  var now = new Date(nowMs)
+  var year = now.getFullYear()
+  var month = now.getMonth()
+  var day = now.getDate()
+  var midnight = Date.UTC(year, month, day)
+  return {
+    sunrise: midnight + sunMinutesUtc(year, month, day, latitude, longitude, true) * 60000,
+    sunset: midnight + sunMinutesUtc(year, month, day, latitude, longitude, false) * 60000
+  }
+}
+
+function localAt(nowMs, dayOffset, minutes) {
+  var now = new Date(nowMs)
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset,
+    Math.floor(minutes / 60), minutes % 60).getTime()
+}
+
+// What the schedule alone says now, and when it next changes its mind.
+function scheduleAt(settings, location, nowMs) {
+  if (settings.mode === "sun") {
+    var today = sunTimes(nowMs, location.latitude, location.longitude)
+    if (nowMs < today.sunrise) return { on: true, next: today.sunrise }
+    if (nowMs < today.sunset) return { on: false, next: today.sunset }
+    var tomorrow = sunTimes(localAt(nowMs, 1, 720), location.latitude, location.longitude)
+    return { on: true, next: tomorrow.sunrise }
+  }
+
+  var onMinutes = parseTime(settings.onTime)
+  var offMinutes = parseTime(settings.offTime)
+  if (onMinutes === offMinutes) return { on: false, next: nowMs + DAY_MS }
+
+  var now = new Date(nowMs)
+  var minute = now.getHours() * 60 + now.getMinutes()
+  var on = onMinutes < offMinutes
+    ? minute >= onMinutes && minute < offMinutes
+    : minute >= onMinutes || minute < offMinutes
+  var target = on ? offMinutes : onMinutes
+  var next = localAt(nowMs, target > minute ? 0 : 1, target)
+  return { on: on, next: next }
+}
+
+// Sun mode with nowhere to take the sun from has no schedule, so the switch rules.
+function followsSwitch(settings, location) {
+  return settings.mode === "manual" || (settings.mode === "sun" && !location)
+}
+
+// What the screen should be doing now. `until` is 0 when nothing will change it.
+function desiredState(settings, location, nowMs) {
+  if (followsSwitch(settings, location)) return { on: settings.manualOn, until: 0 }
+  var override = settings.override
+  if (override && nowMs < override.until) return { on: override.on, until: override.until }
+  var schedule = scheduleAt(settings, location, nowMs)
+  return { on: schedule.on, until: schedule.next }
+}
+
+// The main switch. With a schedule, flipping away from it holds until the next
+// scheduled change, and flipping back simply follows the schedule again.
+function switchPatch(settings, location, nowMs, turnOn) {
+  if (followsSwitch(settings, location)) return { manualOn: turnOn, override: null }
+  var schedule = scheduleAt(settings, location, nowMs)
+  if (turnOn === schedule.on) return { override: null }
+  return { override: { on: turnOn, until: schedule.next } }
+}
+
+function modePatch(settings, mode, currentlyOn) {
+  if (mode === "manual") return { mode: mode, manualOn: currentlyOn, override: null }
+  return { mode: mode, override: null }
+}
+
+if (typeof module !== "undefined") {
+  module.exports = {
+    MIN_TEMP: MIN_TEMP,
+    MAX_TEMP: MAX_TEMP,
+    OFF_TEMP: OFF_TEMP,
+    FRESH_TEMP: FRESH_TEMP,
+    defaultSettings: defaultSettings,
+    parseTime: parseTime,
+    stepTime: stepTime,
+    clampTemp: clampTemp,
+    normalizeSettings: normalizeSettings,
+    parseCoordinates: parseCoordinates,
+    weatherLocation: weatherLocation,
+    zoneName: zoneName,
+    zoneCoordinates: zoneCoordinates,
+    resolveLocation: resolveLocation,
+    sunTimes: sunTimes,
+    scheduleAt: scheduleAt,
+    desiredState: desiredState,
+    switchPatch: switchPatch,
+    modePatch: modePatch
+  }
+}

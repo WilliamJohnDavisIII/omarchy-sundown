@@ -1,0 +1,104 @@
+# Heliotrope
+
+A night light for [Omarchy](https://omarchy.org) that follows the sun. It warms the screen at sunset and clears it at sunrise, with a temperature slider and a custom schedule if you'd rather pick the hours. It's named after the plants that turn to follow the sun.
+
+It's built on `hyprsunset`, which Omarchy already ships. Sun times are calculated on your computer, so it makes no network requests.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/WilliamJohnDavisIII/omarchy-heliotrope.git --enable
+omarchy restart shell
+```
+
+Omarchy's own night light icon stays in the indicators widget. To leave only Heliotrope's, take `NightLight` out of that widget's `items`.
+
+## Use
+
+| Do this | And |
+|---|---|
+| Left-click the icon | Open the panel |
+| Right-click the icon | Flip the switch |
+| Scroll on the icon | Change the temperature |
+
+In the panel, Left and Right change the temperature, Enter flips the switch, and `m` changes the mode.
+
+The modes are:
+
+- **Sun:** on from sunset to sunrise
+- **Custom:** on between two times you choose
+- **Manual:** stays how you set it
+
+Flipping the switch during a schedule holds until the next scheduled change, even across restarts. Moving the slider while the night light is off previews that temperature for 10 seconds.
+
+`omarchy toggle nightlight` still works. It uses Omarchy's fixed 4000K, and that stays until the next scheduled change.
+
+## Location
+
+Sun mode uses the first of these it finds:
+
+1. Coordinates you enter with **Change** in the panel
+2. Omarchy's weather location, if it has coordinates and not only a name
+3. The main city of your system time zone, from `/usr/share/zoneinfo/zone1970.tab`
+
+The time zone is only a rough guide, so sunset can be off by a while if you live far from that city. If none of these is available, the switch stays how you set it until you enter a location.
+
+## Commands
+
+```bash
+ID=io.github.williamjohndavisiii.heliotrope.control
+
+omarchy-shell $ID status
+omarchy-shell $ID on
+omarchy-shell $ID off
+omarchy-shell $ID toggle
+omarchy-shell $ID set 3000              # Save a temperature, from 1000 to 4500
+omarchy-shell $ID schedule sun          # Or manual, or custom
+omarchy-shell $ID hours 21:00 07:00     # Custom on and off times
+omarchy-shell $ID location "52.52, 13.40"
+omarchy-shell $ID location ""           # Back to the automatic location
+```
+
+## Show it with Omarchy's indicators (optional)
+
+To have the icon appear among Omarchy's indicators instead of on its own:
+
+1. Set `showIcon` to `false` on the Heliotrope entry in `~/.config/omarchy/shell.json`.
+2. Add this to the `omarchy.indicators` `items`, using your own home folder:
+
+```
+../../../../../../../home/YOU/.config/omarchy/plugins/io.github.williamjohndavisiii.heliotrope/Indicator
+```
+
+The path is relative to Omarchy's indicators folder, because Omarchy has no supported way to load another plugin's indicator yet.
+
+## Remove
+
+```bash
+omarchy plugin remove io.github.williamjohndavisiii.heliotrope
+hyprctl hyprsunset identity
+rm ~/.local/state/omarchy/settings/heliotrope.json
+```
+
+The second line clears any tint left on the screen, and the third deletes your settings.
+
+## Requirements
+
+Omarchy's Quickshell-based shell and `hyprsunset`, both of which come with Omarchy.
+
+## Tested on
+
+One MacBook Air (M1, 2020) running Asahi, where the tint survived a suspend and resume. Not verified yet:
+
+- Suspend and resume on other hardware ([omacom/omarchy#16052](https://github.com/omacom/omarchy/issues/16052) reports the tint disappearing on an AMD Framework laptop, and Heliotrope doesn't reapply it)
+- Omarchy's stock `~/.config/hypr/hyprsunset.conf`, whose 07:00 profile may clear the tint if the schedule still has it on at that time
+
+## Tests
+
+```bash
+TZ=America/New_York node tests/model.test.js
+```
+
+## License
+
+MIT
