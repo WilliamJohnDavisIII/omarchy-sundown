@@ -88,10 +88,11 @@ Omarchy's Quickshell-based shell and `hyprsunset`, both of which come with Omarc
 
 ## Tested on
 
-One MacBook Air (M1, 2020) running Asahi, where the tint survived a suspend and resume. Not verified yet:
+One MacBook Air (M1, 2020) running Asahi, where the tint survived a suspend and resume.
 
-- Suspend and resume on other hardware ([omacom/omarchy#16052](https://github.com/omacom/omarchy/issues/16052) reports the tint disappearing on an AMD Framework laptop, and Heliotrope doesn't reapply it)
-- Omarchy's stock `~/.config/hypr/hyprsunset.conf`, whose 07:00 profile may clear the tint if the schedule still has it on at that time
+Omarchy's stock `~/.config/hypr/hyprsunset.conf` clears the tint at 07:00. If the schedule still has the night light on then, Heliotrope puts it back at its next check, within about 15 seconds. To avoid that, remove the profile from the file.
+
+Not verified yet: suspend and resume on other hardware. [omacom/omarchy#16052](https://github.com/omacom/omarchy/issues/16052) reports the tint disappearing on an AMD Framework laptop, and Heliotrope doesn't reapply it.
 
 ## Tests
 
