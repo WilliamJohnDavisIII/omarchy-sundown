@@ -32,7 +32,6 @@ Panel {
   readonly property real untilMs: serviceReady ? service.plan.until : 0
 
   property bool editingLocation: false
-  property bool locationInvalid: false
   property real wheelAccumulator: 0
 
   readonly property bool showIcon: setting("showIcon", true) !== false
@@ -54,7 +53,6 @@ Panel {
 
   onOpenedChanged: {
     editingLocation = false
-    locationInvalid = false
     if (!serviceReady) return
     service.panelOpen = opened
     if (!opened) service.endPreview()
@@ -95,14 +93,19 @@ Panel {
     if (serviceReady) service.setSwitch(!switchOn)
   }
 
+  // Just the place. Where it came from shows in the buttons beside it.
   function locationText() {
     var place = serviceReady ? service.location : null
     if (!place) return strings.t("location.none")
-    if (place.source === "custom") return strings.t("location.custom").arg(Commons.I18n.formatNumber(place.latitude, 2)).arg(Commons.I18n.formatNumber(place.longitude, 2))
-    if (place.source === "weather" && place.label) return strings.t("location.weather").arg(place.label)
-    if (place.source === "weather") return strings.t("location.weatherUnnamed")
-    return strings.t("location.timezone").arg(place.label)
+    if (place.source === "custom")
+      return Commons.I18n.formatNumber(place.latitude, 2) + ", " + Commons.I18n.formatNumber(place.longitude, 2)
+    if (place.source === "timezone") {
+      var parts = String(place.label).split("/")
+      return parts[parts.length - 1].replace(/_/g, " ")
+    }
+    return place.label || Commons.I18n.formatNumber(place.latitude, 2) + ", " + Commons.I18n.formatNumber(place.longitude, 2)
   }
+
 
   function cycleMode() {
     if (!serviceReady) return
@@ -248,30 +251,6 @@ Panel {
             onMoved: function(sliderValue) { if (root.serviceReady) root.service.preview(root.kelvinFor(sliderValue)) }
             onReleased: function(sliderValue) { if (root.serviceReady) root.service.setTemperature(root.kelvinFor(sliderValue)) }
           }
-
-          Item {
-            width: parent.width
-            implicitHeight: coolerLabel.implicitHeight
-
-            Text {
-              id: coolerLabel
-              textFormat: Text.PlainText
-              text: strings.t("cooler")
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              anchors.left: parent.left
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              text: strings.t("warmer")
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              anchors.right: parent.right
-            }
-          }
         }
 
         PanelSeparator {
@@ -280,7 +259,7 @@ Panel {
 
         Column {
           width: parent.width
-          spacing: Style.space(8)
+          spacing: Style.space(10)
 
           PanelSectionHeader {
             text: strings.t("schedule")
@@ -315,56 +294,89 @@ Panel {
             timeValue: root.serviceReady ? root.service.offTime : ""
           }
 
-          Text {
+          // The sun's times, shown rather than explained.
+          Item {
             width: parent.width
-            textFormat: Text.PlainText
-            visible: text !== ""
-            text: {
-              if (root.previewing) return strings.t("hint.preview")
-              if (root.mode === "sun" && root.serviceReady && root.service.location)
-                return strings.t("hint.sun").arg(root.clockText(root.service.sunset)).arg(root.clockText(root.service.sunrise))
-              if (root.mode === "manual") return strings.t("hint.manual")
-              return ""
+            visible: root.mode === "sun" && root.serviceReady && root.service.location !== null
+            implicitHeight: sunsetText.implicitHeight
+
+            Text {
+              id: sunsetText
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              text: "󰖛  " + root.clockText(root.serviceReady ? root.service.sunset : 0)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
             }
-            color: Qt.darker(root.bar.foreground, 1.4)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              text: "󰖜  " + root.clockText(root.serviceReady ? root.service.sunrise : 0)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+
+          SwitchRow {
+            visible: root.mode !== "manual"
+            label: strings.t("ramp")
+            checked: root.serviceReady && root.service.ramp
+            onToggled: if (root.serviceReady) root.service.setRamp(!root.service.ramp)
           }
 
           Item {
             width: parent.width
             visible: root.mode === "sun" && !root.editingLocation
-            implicitHeight: Math.max(locationLabel.implicitHeight, locationButton.implicitHeight)
+            implicitHeight: Math.max(placeText.implicitHeight, editButton.implicitHeight)
 
             Text {
-              id: locationLabel
+              id: placeText
               textFormat: Text.PlainText
               anchors.left: parent.left
-              anchors.right: locationButton.left
+              anchors.right: locationButtons.left
               anchors.rightMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
-              text: root.locationText()
-              color: Qt.darker(root.bar.foreground, 1.4)
+              text: "󰍎  " + root.locationText()
+              color: root.bar.foreground
               font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
             }
 
-            Button {
-              id: locationButton
+            Row {
+              id: locationButtons
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              text: strings.t("location.change")
-              bordered: true
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              onClicked: {
-                var place = root.serviceReady ? root.service.location : null
-                locationField.text = place && place.source === "custom" ? place.latitude + ", " + place.longitude : ""
-                root.locationInvalid = false
-                root.editingLocation = true
-                locationField.forceActiveFocus()
+              spacing: Style.space(6)
+
+              Button {
+                iconText: "󰆤"
+                tooltipText: strings.t("location.detect")
+                bordered: true
+                selected: root.serviceReady && root.service.autoLocation
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                onClicked: if (root.serviceReady) root.service.setAutoLocation(!root.service.autoLocation)
+              }
+
+              Button {
+                id: editButton
+                iconText: "󰏫"
+                tooltipText: strings.t("location.edit")
+                bordered: true
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                // Here rather than on root: the field lives inside the panel's
+                // content, which root can't see into.
+                onClicked: {
+                  var place = root.serviceReady ? root.service.location : null
+                  locationField.text = place && place.source === "custom" ? place.latitude + ", " + place.longitude : ""
+                  root.editingLocation = true
+                  locationField.forceActiveFocus()
+                }
               }
             }
           }
@@ -378,11 +390,13 @@ Panel {
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.body
             onAccepted: {
+              // Empty goes back to finding it automatically. Anything unreadable stays
+              // selected, ready to be typed over.
               if (root.serviceReady && root.service.setLocation(text)) {
                 root.editingLocation = false
                 keys.forceActiveFocus()
               } else {
-                root.locationInvalid = true
+                selectAll()
               }
             }
             Keys.onEscapePressed: {
@@ -390,19 +404,39 @@ Panel {
               keys.forceActiveFocus()
             }
           }
-
-          Text {
-            width: parent.width
-            textFormat: Text.PlainText
-            visible: root.mode === "sun" && root.editingLocation
-            text: root.locationInvalid ? strings.t("location.invalid") : strings.t("location.hint")
-            color: root.locationInvalid ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
         }
       }
+    }
+  }
+
+  component SwitchRow: Item {
+    id: switchRow
+
+    property string label: ""
+    property bool checked: false
+    signal toggled()
+
+    width: parent.width
+    implicitHeight: Math.max(switchLabel.implicitHeight, rowSwitch.implicitHeight)
+
+    Text {
+      id: switchLabel
+      textFormat: Text.PlainText
+      text: switchRow.label
+      color: root.bar.foreground
+      font.family: root.bar.fontFamily
+      font.pixelSize: Style.font.body
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+    }
+
+    ToggleSwitch {
+      id: rowSwitch
+      checked: switchRow.checked
+      foreground: root.bar.foreground
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      onToggled: switchRow.toggled()
     }
   }
 

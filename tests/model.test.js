@@ -188,6 +188,121 @@ test("daylight saving changes keep custom hours on the clock", () => {
   assert.strictEqual(Model.scheduleAt(s, place, at(2027, 3, 13, 22)).next, at(2027, 3, 14, 7))
 })
 
+const MIN = 60000
+
+test("sun ramp warms for an hour from sunset", () => {
+  const s = settings({ mode: "sun", temperature: 1000 })
+  const set = Model.sunTimes(at(2026, 11, 5, 12), place.latitude, place.longitude).sunset
+  assert.strictEqual(Model.kelvinAt(s, place, set - MIN), Model.OFF_TEMP)
+  assert.strictEqual(Model.kelvinAt(s, place, set), Model.OFF_TEMP)
+  let previous = Model.OFF_TEMP
+  for (let minute = 1; minute < 60; minute++) {
+    const kelvin = Model.kelvinAt(s, place, set + minute * MIN)
+    assert.ok(kelvin <= previous && kelvin > 1000, "minute " + minute + ": " + kelvin)
+    previous = kelvin
+  }
+  assert.strictEqual(Model.kelvinAt(s, place, set + 60 * MIN), 1000)
+  assert.strictEqual(Model.kelvinAt(s, place, set + 120 * MIN), 1000)
+})
+
+test("sun ramp clears over the half hour before sunrise", () => {
+  const s = settings({ mode: "sun", temperature: 1000 })
+  const rise = Model.sunTimes(at(2026, 11, 6, 12), place.latitude, place.longitude).sunrise
+  assert.strictEqual(Model.kelvinAt(s, place, rise - 31 * MIN), 1000)
+  let previous = 1000
+  for (let minute = 29; minute >= 1; minute--) {
+    const kelvin = Model.kelvinAt(s, place, rise - minute * MIN)
+    assert.ok(kelvin >= previous && kelvin < Model.OFF_TEMP, "minute " + minute + ": " + kelvin)
+    previous = kelvin
+  }
+  assert.strictEqual(Model.kelvinAt(s, place, rise), Model.OFF_TEMP)
+})
+
+test("a ramp reaches a target that isn't a round number", () => {
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00", temperature: 3333 })
+  assert.strictEqual(Model.kelvinAt(s, place, at(2026, 11, 5, 22, 30)), 3333)
+})
+
+test("custom hours ramp the same way, including just after midnight", () => {
+  const s = settings({ mode: "custom", onTime: "23:30", offTime: "07:00", temperature: 1000 })
+  const middle = Model.kelvinAt(s, place, at(2026, 11, 5, 23, 45))
+  assert.ok(middle < Model.OFF_TEMP && middle > 1000)
+  const later = Model.kelvinAt(s, place, at(2026, 11, 6, 0, 15))
+  assert.ok(later < middle && later > 1000, "still warming after midnight")
+  assert.strictEqual(Model.kelvinAt(s, place, at(2026, 11, 6, 3)), 1000)
+})
+
+test("turning the ramp off goes straight to the temperature", () => {
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00", temperature: 2000, ramp: false })
+  assert.strictEqual(Model.kelvinAt(s, place, at(2026, 11, 5, 21, 0)), 2000)
+  assert.strictEqual(Model.kelvinAt(s, place, at(2026, 11, 6, 6, 59)), 2000)
+  assert.strictEqual(Model.kelvinAt(s, place, at(2026, 11, 6, 7, 0)), Model.OFF_TEMP)
+})
+
+test("holds and manual mode ignore the ramp", () => {
+  const now = at(2026, 11, 5, 10)
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00", temperature: 2000 })
+  const on = settings(Object.assign({}, s, Model.switchPatch(s, place, now, true)))
+  assert.strictEqual(Model.kelvinAt(on, place, now), 2000)
+  const night = at(2026, 11, 5, 21, 30)
+  const off = settings(Object.assign({}, s, Model.switchPatch(s, place, night, false)))
+  assert.strictEqual(Model.kelvinAt(off, place, night), Model.OFF_TEMP)
+  const manual = settings({ mode: "manual", manualOn: true, temperature: 2000 })
+  assert.strictEqual(Model.kelvinAt(manual, place, night), 2000)
+})
+
+test("a hold ending at the schedule's start stays warm with no restart", () => {
+  const until = at(2026, 11, 5, 21)
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "07:00", temperature: 2000, override: { on: true, until: until } })
+  const after = settings(Object.assign({}, s, Model.holdEndPatch(s.override)))
+  assert.strictEqual(after.override, null)
+  assert.strictEqual(Model.kelvinAt(after, place, until), 2000)
+  assert.strictEqual(Model.kelvinAt(after, place, until + 30 * MIN), 2000)
+  assert.strictEqual(Model.kelvinAt(after, place, until + 61 * MIN), 2000)
+  // The morning still clears gradually.
+  assert.ok(Model.kelvinAt(after, place, at(2026, 11, 6, 6, 45)) > 2000)
+  // A hold that kept it off has nothing to protect.
+  assert.deepStrictEqual(Model.holdEndPatch({ on: false, until: until }), { override: null })
+})
+
+test("a ramp never lands on hyprsunset's just-restarted value", () => {
+  for (let progress = 0; progress <= 1; progress += 0.0005) {
+    assert.notStrictEqual(Model.mixKelvin(Model.OFF_TEMP, 1000, progress), Model.FRESH_TEMP)
+    assert.notStrictEqual(Model.mixKelvin(1000, Model.OFF_TEMP, progress), Model.FRESH_TEMP)
+  }
+})
+
+test("a night shorter than its ramps never goes past the temperature", () => {
+  const s = settings({ mode: "custom", onTime: "21:00", offTime: "21:40", temperature: 1000 })
+  const kelvin = Model.kelvinAt(s, place, at(2026, 11, 5, 21, 20))
+  assert.ok(kelvin > 1000 && kelvin < Model.OFF_TEMP, String(kelvin))
+})
+
+test("detected location ranks below your own and above weather, only when on", () => {
+  const weather = { latitude: 59.9, longitude: 10.7, name: "Oslo" }
+  const detected = { latitude: 42.6, longitude: -70.9, name: "Topsfield" }
+  assert.strictEqual(Model.resolveLocation(settings({ autoLocation: true, detected }), weather, null).source, "detected")
+  assert.strictEqual(Model.resolveLocation(settings({ autoLocation: false, detected }), weather, null).source, "weather")
+  assert.strictEqual(Model.resolveLocation(settings({ autoLocation: true }), weather, null).source, "weather")
+  assert.strictEqual(Model.resolveLocation(settings({ autoLocation: true, detected, latitude: 1, longitude: 2 }), weather, null).source, "custom")
+})
+
+test("detected location ignores small moves", () => {
+  const home = { latitude: 42.66, longitude: -71 }
+  assert.strictEqual(Model.movedFar(null, home), true)
+  assert.strictEqual(Model.movedFar(home, null), false)
+  assert.strictEqual(Model.movedFar(home, { latitude: 42.64, longitude: -70.97 }), false)
+  assert.strictEqual(Model.movedFar(home, { latitude: 40.96, longitude: -80.56 }), true)
+})
+
+test("settings without the newer fields keep working", () => {
+  const s = Model.normalizeSettings({ mode: "sun", temperature: 1000 })
+  assert.strictEqual(s.ramp, true)
+  assert.strictEqual(s.autoLocation, false)
+  assert.strictEqual(s.detected, null)
+  assert.strictEqual(Model.normalizeSettings({ detected: { latitude: 500, longitude: 0 } }).detected, null)
+})
+
 if (process.env.SUN_FIXTURE) {
   test("sun times match the reference list within a second", () => {
     const fixture = JSON.parse(fs.readFileSync(process.env.SUN_FIXTURE, "utf8"))

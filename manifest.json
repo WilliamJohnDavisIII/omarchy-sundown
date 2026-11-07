@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "id": "io.github.williamjohndavisiii.heliotrope",
-  "name": "Heliotrope",
-  "version": "1.0.0",
+  "name": "Sundown",
+  "version": "1.1.0",
   "author": "William John Davis III",
-  "description": "A night light that follows the sun. A bar icon and dropdown with a temperature slider and a sunrise, sunset, or custom schedule.",
+  "description": "A night light that follows the sun. A bar icon and dropdown with a temperature slider, gradual sunset and sunrise changes, and a sun, custom, or manual schedule.",
   "kinds": [
     "service",
     "bar-widget"
@@ -14,7 +14,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Heliotrope",
+    "displayName": "Sundown",
     "description": "Bar icon and dropdown for the night light and its schedule.",
     "category": "System",
     "allowMultiple": false,

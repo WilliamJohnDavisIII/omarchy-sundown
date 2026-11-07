@@ -8,9 +8,9 @@ import "Model.js" as Model
 // button. It owns the settings and the schedule, and is the only part of the
 // plugin that talks to hyprsunset.
 //
-// Scheduled changes are edge-triggered: the screen is only set when the plan
-// changes or hyprsunset restarts, so `omarchy toggle nightlight` or a hand-typed
-// hyprctl command stays put until the next scheduled change.
+// The screen follows Model.kelvinAt, which is steady except during a ramp. If
+// `omarchy toggle nightlight` or a hand-typed hyprctl command changes it, that is
+// noticed and stays put until the next scheduled change, even in mid-ramp.
 Item {
   id: root
 
@@ -52,18 +52,35 @@ Item {
   property bool previewing: false
 
   property var lastPlanOn: null
+  // The temperature tick() last sent, to spot the next ramp step.
+  property var lastLevel: null
+  // Something else set the temperature, so ramp steps wait for the next change.
+  property bool externalHold: false
+  // setSwitch fades for itself, so tick() leaves the screen alone meanwhile.
+  property bool switching: false
+  property int fadeFrom: 0
+  property int fadeTarget: 0
+  property real fadeStart: 0
+  property real lastTickAt: 0
+  property bool detectSucceeded: false
   property int applyTarget: 0
   property bool applySettled: true
   property int applyAttempts: 0
   property int queuedTarget: 0
   property real lastStartAttempt: 0
 
-  readonly property bool nightOn: actualTemp !== null && actualTemp < Model.FRESH_TEMP
-  readonly property bool switchOn: nightOn && !previewing
+  // Counts as on through the first, barely tinted part of a ramp, and shows where
+  // a fade is heading so the switch doesn't flicker.
+  readonly property bool nightOn: fadeTimer.running
+    ? fadeTarget < Model.FRESH_TEMP
+    : actualTemp !== null && (actualTemp < Model.FRESH_TEMP || (plan.on && !externalHold))
+  readonly property bool switchOn: nightOn && !(previewing && !plan.on)
   readonly property string mode: settings.mode
   readonly property int temperature: settings.temperature
   readonly property string onTime: settings.onTime
   readonly property string offTime: settings.offTime
+  readonly property bool ramp: settings.ramp
+  readonly property bool autoLocation: settings.autoLocation
 
   function updateSettings(patch) {
     // Saving before the file has loaded would replace it with the defaults.
@@ -87,15 +104,23 @@ Item {
     if (!settingsLoaded) return
     previewTimer.stop()
     previewing = false
+    externalHold = false
+    switching = true
     updateSettings(Model.switchPatch(settings, location, Date.now(), turnOn))
+    switching = false
+    lastPlanOn = plan.on
     // Also covers a switch that already matched the plan, like after the menu's toggle.
-    apply(plan.on ? temperature : Model.OFF_TEMP)
+    var level = currentLevel()
+    lastLevel = level
+    fadeTo(level)
   }
 
   function preview(kelvin) {
     if (!settingsLoaded) return
     var clamped = Model.clampTemp(kelvin)
-    if (plan.on) {
+    fadeTimer.stop()
+    // In mid-ramp a preview has to end too, or the next step would snap it back early.
+    if (plan.on && currentLevel() === temperature) {
       previewing = false
     } else {
       previewing = true
@@ -106,6 +131,7 @@ Item {
 
   function setTemperature(kelvin) {
     var clamped = Model.clampTemp(kelvin)
+    externalHold = false
     updateSettings({ temperature: clamped })
     preview(clamped)
   }
@@ -122,6 +148,33 @@ Item {
     return true
   }
 
+  function setRamp(enabled) {
+    updateSettings({ ramp: enabled })
+  }
+
+  // Turning it off forgets the detected place along with the lookups.
+  function setAutoLocation(enabled) {
+    if (enabled) {
+      updateSettings({ autoLocation: true })
+      detectLocation()
+    } else {
+      updateSettings({ autoLocation: false, detected: null })
+    }
+  }
+
+  function detectLocation() {
+    if (!settingsLoaded || !settings.autoLocation || detectProcess.running) return
+    detectProcess.running = true
+  }
+
+  // A failed lookup keeps the last place, so this works offline.
+  function handleDetected(text) {
+    var place = Model.weatherLocation(text)
+    detectSucceeded = place !== null
+    if (settings.autoLocation && Model.movedFar(settings.detected, place))
+      updateSettings({ detected: place })
+  }
+
   function setTime(key, text) {
     var patch = {}
     patch[key] = text
@@ -136,16 +189,46 @@ Item {
     if (!previewing) return
     previewTimer.stop()
     previewing = false
-    apply(plan.on ? temperature : Model.OFF_TEMP)
+    externalHold = false
+    lastLevel = currentLevel()
+    apply(lastLevel)
+  }
+
+  function currentLevel() {
+    return Model.kelvinAt(settings, location, Date.now())
+  }
+
+  // A couple of seconds rather than a jump. Needs a temperature to start from, so
+  // a hyprsunset that isn't answering is just told where to end up.
+  function fadeTo(kelvin) {
+    fadeTimer.stop()
+    if (actualTemp === null || actualTemp === kelvin) {
+      apply(kelvin)
+      return
+    }
+    fadeFrom = actualTemp
+    fadeTarget = kelvin
+    fadeStart = Date.now()
+    fadeTimer.start()
+  }
+
+  function fadeStep() {
+    var progress = (Date.now() - fadeStart) / Model.FADE_MS
+    if (progress >= 1) fadeTimer.stop()
+    apply(Model.mixKelvin(fadeFrom, fadeTarget, progress))
   }
 
   function tick() {
     if (!settingsLoaded || !locationChecked) return
     var now = Date.now()
     if (settings.override && now >= settings.override.until) {
-      updateSettings({ override: null })
+      updateSettings(Model.holdEndPatch(settings.override))
       return
     }
+
+    // Asleep for a while, so this may be somewhere new.
+    if (lastTickAt && now - lastTickAt > 300000) detectLocation()
+    lastTickAt = now
 
     // The next of each, so the panel agrees with "on until" after today's has passed.
     if (location) {
@@ -158,12 +241,22 @@ Item {
       sunset = 0
     }
     plan = Model.desiredState(settings, location, now)
+    if (switching) return
 
+    var level = Model.kelvinAt(settings, location, now)
     if (lastPlanOn !== plan.on) {
+      // No fade the first time, or a restart at night would sweep up from nothing.
+      var first = lastPlanOn === null
       lastPlanOn = plan.on
+      lastLevel = level
+      externalHold = false
       previewTimer.stop()
       previewing = false
-      apply(plan.on ? temperature : Model.OFF_TEMP)
+      if (first) apply(level)
+      else fadeTo(level)
+    } else if (level !== lastLevel && !externalHold && !previewing && !fadeTimer.running) {
+      lastLevel = level
+      apply(level)
     }
     if (!probeProcess.running) probeProcess.running = true
   }
@@ -204,7 +297,7 @@ Item {
           Quickshell.execDetached(["uwsm-app", "--", "hyprsunset"])
         }
         applySettled = false
-        applyTarget = previewing ? applyTarget : temperature
+        applyTarget = previewing ? applyTarget : currentLevel()
         applyAttempts++
         if (applyAttempts % 5 === 0 && applyAttempts <= 30) runApply()
       } else {
@@ -216,12 +309,17 @@ Item {
     actualTemp = reported
     if (reported === Model.FRESH_TEMP) {
       // hyprsunset just restarted, which drops whatever was set before.
-      apply(plan.on ? temperature : Model.OFF_TEMP)
+      fadeTimer.stop()
+      externalHold = false
+      lastLevel = currentLevel()
+      apply(lastLevel)
     } else if (!applySettled && reported === applyTarget) {
       applySettled = true
     } else if (!applySettled && applyAttempts < 30) {
       applyAttempts++
       runApply()
+    } else if (applySettled && reported !== applyTarget && !fadeTimer.running) {
+      externalHold = true
     }
   }
 
@@ -356,6 +454,33 @@ Item {
     onTriggered: root.endPreview()
   }
 
+  Timer {
+    id: fadeTimer
+    interval: 100
+    repeat: true
+    onTriggered: root.fadeStep()
+  }
+
+  // The same lookup the weather widget makes. Never waited for: the saved place,
+  // or the next location in line, is used until it answers.
+  Process {
+    id: detectProcess
+    command: ["curl", "-fsS", "--max-time", "4", "https://geo.omarchy.org/"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleDetected(text)
+    }
+  }
+
+  // Every few hours, or soon again if the network wasn't up yet.
+  Timer {
+    interval: root.detectSucceeded ? 10800000 : 300000
+    running: root.settingsLoaded && root.settings.autoLocation
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.detectLocation()
+  }
+
   // Checks quickly while a change is settling, like hyprsunset still starting.
   Timer {
     interval: root.applySettled || root.applyAttempts >= 30 ? 15000 : 1000
@@ -379,6 +504,9 @@ Item {
         planOn: root.plan.on,
         until: root.plan.until ? new Date(root.plan.until).toLocaleString() : "",
         previewing: root.previewing,
+        ramp: root.ramp,
+        autoLocation: root.autoLocation,
+        externalHold: root.externalHold,
         override: root.settings.override
       })
     }
@@ -391,6 +519,8 @@ Item {
     function location(coordinates: string): string {
       return root.setLocation(coordinates) ? "ok" : "invalid"
     }
+    function ramp(value: string): void { root.setRamp(value === "on") }
+    function autolocation(value: string): void { root.setAutoLocation(value === "on") }
     function hours(onTime: string, offTime: string): void {
       root.updateSettings({ onTime: onTime, offTime: offTime })
     }

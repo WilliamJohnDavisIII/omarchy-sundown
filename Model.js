@@ -7,6 +7,10 @@ var OFF_TEMP = 6500 // Reported while off, matching omarchy-toggle-nightlight
 var FRESH_TEMP = 6000 // hyprsunset's default; only ever reported right after it starts
 var DAY_MS = 86400000
 var MODES = ["manual", "sun", "custom"]
+var RAMP_IN_MS = 3600000 // Warming up, from the moment the schedule turns on
+var RAMP_OUT_MS = 1800000 // Clearing, ending the moment the schedule turns off
+var FADE_MS = 2000 // Flipping the switch
+var MOVED_DEGREES = 0.05 // About 5 km, or a few seconds of sunset
 
 function isLatitude(value) {
   return Number.isFinite(value) && Math.abs(value) <= 90
@@ -25,7 +29,11 @@ function defaultSettings() {
     offTime: "07:00",
     latitude: null,
     longitude: null,
-    override: null
+    override: null,
+    ramp: true,
+    rampSkipUntil: 0,
+    autoLocation: false,
+    detected: null
   }
 }
 
@@ -66,6 +74,17 @@ function normalizeSettings(raw) {
   var override = raw.override
   if (override && typeof override.on === "boolean" && Number.isFinite(override.until))
     result.override = { on: override.on, until: override.until }
+  if (typeof raw.ramp === "boolean") result.ramp = raw.ramp
+  if (Number.isFinite(raw.rampSkipUntil)) result.rampSkipUntil = raw.rampSkipUntil
+  if (typeof raw.autoLocation === "boolean") result.autoLocation = raw.autoLocation
+  var detected = raw.detected
+  if (detected && isLatitude(detected.latitude) && isLongitude(detected.longitude)) {
+    result.detected = {
+      latitude: detected.latitude,
+      longitude: detected.longitude,
+      name: typeof detected.name === "string" ? detected.name.slice(0, 64) : ""
+    }
+  }
   return result
 }
 
@@ -122,11 +141,23 @@ function zoneCoordinates(table, zone) {
   return null
 }
 
-// Your own coordinates, then Omarchy's weather location, then the time zone.
+// Worth saving a new detected place? IP locations jitter, and a few km changes
+// sunset by seconds, so small moves are ignored.
+function movedFar(previous, next) {
+  if (!next) return false
+  if (!previous) return true
+  return Math.abs(previous.latitude - next.latitude) >= MOVED_DEGREES
+    || Math.abs(previous.longitude - next.longitude) >= MOVED_DEGREES
+}
+
+// Your own coordinates, then the detected place if that's on, then Omarchy's
+// weather location, then the time zone.
 // Null means Sun mode has nothing to go on.
 function resolveLocation(settings, weather, zone) {
   if (settings.latitude !== null && settings.longitude !== null)
     return { latitude: settings.latitude, longitude: settings.longitude, source: "custom", label: "" }
+  if (settings.autoLocation && settings.detected)
+    return { latitude: settings.detected.latitude, longitude: settings.detected.longitude, source: "detected", label: settings.detected.name }
   if (weather) return { latitude: weather.latitude, longitude: weather.longitude, source: "weather", label: weather.name }
   if (zone) return { latitude: zone.latitude, longitude: zone.longitude, source: "timezone", label: zone.zone }
   return null
@@ -213,6 +244,19 @@ function scheduleAt(settings, location, nowMs) {
   return { on: on, next: next }
 }
 
+// When the schedule most recently turned on. Only meaningful while it says on.
+function scheduleStart(settings, location, nowMs) {
+  if (settings.mode === "sun") {
+    var today = sunTimes(nowMs, location.latitude, location.longitude)
+    if (nowMs >= today.sunset) return today.sunset
+    return sunTimes(localAt(nowMs, -1, 720), location.latitude, location.longitude).sunset
+  }
+  var onMinutes = parseTime(settings.onTime)
+  var now = new Date(nowMs)
+  var minute = now.getHours() * 60 + now.getMinutes()
+  return localAt(nowMs, minute >= onMinutes ? 0 : -1, onMinutes)
+}
+
 // Sun mode with nowhere to take the sun from has no schedule, so the switch rules.
 function followsSwitch(settings, location) {
   return settings.mode === "manual" || (settings.mode === "sun" && !location)
@@ -227,6 +271,39 @@ function desiredState(settings, location, nowMs) {
   return { on: schedule.on, until: schedule.next }
 }
 
+// A step between two temperatures, even to the eye rather than even in Kelvin, so
+// the change doesn't bunch up at the warm end. Rounded to 10K, and never exactly
+// FRESH_TEMP, which is how a restarted hyprsunset is recognized.
+function mixKelvin(from, to, progress) {
+  if (progress <= 0) return from
+  if (progress >= 1) return to
+  var kelvin = 1000000 / (1000000 / from + progress * (1000000 / to - 1000000 / from))
+  var rounded = Math.round(kelvin / 10) * 10
+  return rounded === FRESH_TEMP ? rounded + 10 : rounded
+}
+
+// The temperature the screen should be at now, including any ramp in progress.
+// Worked out from the clock alone, so a restart or suspend lands in the right place.
+function kelvinAt(settings, location, nowMs) {
+  if (!desiredState(settings, location, nowMs).on) return OFF_TEMP
+  var target = settings.temperature
+  if (!settings.ramp || followsSwitch(settings, location)) return target
+  if (settings.override && nowMs < settings.override.until) return target
+
+  var progress = (scheduleAt(settings, location, nowMs).next - nowMs) / RAMP_OUT_MS
+  if (nowMs >= settings.rampSkipUntil)
+    progress = Math.min(progress, (nowMs - scheduleStart(settings, location, nowMs)) / RAMP_IN_MS)
+  return mixKelvin(OFF_TEMP, target, progress)
+}
+
+// A hold that was keeping the night light on has ended at the moment the schedule
+// takes over. Skip that evening's warm-up, or the screen would clear and start again.
+function holdEndPatch(override) {
+  var patch = { override: null }
+  if (override && override.on) patch.rampSkipUntil = override.until + RAMP_IN_MS
+  return patch
+}
+
 // The main switch. With a schedule, flipping away from it holds until the next
 // scheduled change, and flipping back simply follows the schedule again.
 function switchPatch(settings, location, nowMs, turnOn) {
@@ -237,8 +314,8 @@ function switchPatch(settings, location, nowMs, turnOn) {
 }
 
 function modePatch(settings, mode, currentlyOn) {
-  if (mode === "manual") return { mode: mode, manualOn: currentlyOn, override: null }
-  return { mode: mode, override: null }
+  if (mode === "manual") return { mode: mode, manualOn: currentlyOn, override: null, rampSkipUntil: 0 }
+  return { mode: mode, override: null, rampSkipUntil: 0 }
 }
 
 if (typeof module !== "undefined") {
@@ -247,6 +324,9 @@ if (typeof module !== "undefined") {
     MAX_TEMP: MAX_TEMP,
     OFF_TEMP: OFF_TEMP,
     FRESH_TEMP: FRESH_TEMP,
+    RAMP_IN_MS: RAMP_IN_MS,
+    RAMP_OUT_MS: RAMP_OUT_MS,
+    FADE_MS: FADE_MS,
     defaultSettings: defaultSettings,
     parseTime: parseTime,
     stepTime: stepTime,
@@ -256,10 +336,14 @@ if (typeof module !== "undefined") {
     weatherLocation: weatherLocation,
     zoneName: zoneName,
     zoneCoordinates: zoneCoordinates,
+    movedFar: movedFar,
     resolveLocation: resolveLocation,
     sunTimes: sunTimes,
     scheduleAt: scheduleAt,
     desiredState: desiredState,
+    mixKelvin: mixKelvin,
+    kelvinAt: kelvinAt,
+    holdEndPatch: holdEndPatch,
     switchPatch: switchPatch,
     modePatch: modePatch
   }
