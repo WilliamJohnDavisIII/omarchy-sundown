@@ -43,6 +43,8 @@ Sun mode uses the first of these it finds:
 
 The time zone is only a rough guide, so sunset can be off by a while if you live far from that city. If none of these is available, the switch stays how you set it until you enter a location.
 
+Coordinates you enter are saved as typed in `~/.local/state/omarchy/settings/heliotrope.json`. Heliotrope keeps that file readable only by your account.
+
 ## Commands
 
 ```bash

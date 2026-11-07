@@ -19,6 +19,7 @@ Item {
   readonly property int previewMilliseconds: 10000
   readonly property string home: Quickshell.env("HOME")
   readonly property string settingsDirectory: home + "/.local/state/omarchy/settings"
+  readonly property string settingsPath: settingsDirectory + "/heliotrope.json"
 
   // The icon asks for the panel through here; Panel.qml answers.
   signal panelToggleRequested(var window)
@@ -28,6 +29,7 @@ Item {
   property var settings: Model.normalizeSettings(null)
   property bool settingsLoaded: false
   property bool directoryReady: false
+  property bool settingsSecured: false
 
   property var weather: null
   property string zone: ""
@@ -224,6 +226,12 @@ Item {
   }
 
   function loadSettings(text) {
+    // Newly created by settingsSetup: fill it in, keeping anything already in memory.
+    if (String(text).trim() === "") {
+      settingsLoaded = true
+      updateSettings({})
+      return
+    }
     var parsed = null
     try {
       parsed = JSON.parse(text)
@@ -240,15 +248,25 @@ Item {
   onLocationChanged: tick()
   onLocationCheckedChanged: tick()
 
+  // The settings can hold private coordinates, so the file is owner-only before
+  // anything is saved to it. Saves replace the file but keep its permissions, and
+  // this also tightens a file made by an earlier version.
   Process {
+    id: settingsSetup
     running: true
-    command: ["mkdir", "-p", root.settingsDirectory]
-    onExited: root.directoryReady = true
+    command: ["sh", "-c", "mkdir -p \"$1\" && touch \"$2\" && chmod 600 \"$2\"",
+      "heliotrope", root.settingsDirectory, root.settingsPath]
+    onExited: function(exitCode) {
+      root.settingsSecured = exitCode === 0
+      if (!root.settingsSecured)
+        console.warn("io.github.williamjohndavisiii.heliotrope: could not make the settings file private")
+      root.directoryReady = true
+    }
   }
 
   FileView {
     id: settingsFile
-    path: root.directoryReady ? root.settingsDirectory + "/heliotrope.json" : ""
+    path: root.directoryReady ? root.settingsPath : ""
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -258,9 +276,16 @@ Item {
         console.warn("io.github.williamjohndavisiii.heliotrope: could not read settings: " + FileViewError.toString(error))
         return
       }
-      // First run: start from the defaults and create the file.
+      // Deleted while running. A plain save would recreate it readable by others.
+      if (root.settingsSecured) {
+        root.settingsSecured = false
+        root.directoryReady = false
+        settingsSetup.running = true
+        return
+      }
+      // Setup couldn't create it, so run on the defaults without saving a new file.
       root.settingsLoaded = true
-      root.updateSettings({})
+      root.tick()
     }
   }
 
