@@ -303,6 +303,18 @@ test("settings without the newer fields keep working", () => {
   assert.strictEqual(Model.normalizeSettings({ detected: { latitude: 500, longitude: 0 } }).detected, null)
 })
 
+test("below 1000K hyprsunset stays at its floor and the shader takes over", () => {
+  assert.strictEqual(Model.clampTemp(100), Model.MIN_TEMP)
+  assert.strictEqual(Model.hyprsunsetKelvin(700), 1000)
+  assert.strictEqual(Model.hyprsunsetKelvin(3000), 3000)
+  assert.strictEqual(Model.extraWarmStep(1000), 0)
+  assert.strictEqual(Model.extraWarmStep(Model.OFF_TEMP), 0)
+  assert.strictEqual(Model.extraWarmStep(990), 1, "any amount below shows")
+  assert.strictEqual(Model.extraWarmStep(750), 5)
+  assert.strictEqual(Model.extraWarmStep(Model.MIN_TEMP), 10)
+  assert.strictEqual(Model.normalizeSettings({ temperature: 600 }).temperature, 600)
+})
+
 if (process.env.SUN_FIXTURE) {
   test("sun times match the reference list within a second", () => {
     const fixture = JSON.parse(fs.readFileSync(process.env.SUN_FIXTURE, "utf8"))

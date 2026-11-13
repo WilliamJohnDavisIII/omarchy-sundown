@@ -68,6 +68,8 @@ Item {
   property int applyAttempts: 0
   property int queuedTarget: 0
   property real lastStartAttempt: 0
+  property bool shaderQueued: false
+  readonly property string shaderScript: String(Qt.resolvedUrl("warm-shader.sh")).replace(/^file:\/\//, "")
 
   // Counts as on through the first, barely tinted part of a ramp, and shows where
   // a fade is heading so the switch doesn't flicker.
@@ -259,6 +261,7 @@ Item {
       apply(level)
     }
     if (!probeProcess.running) probeProcess.running = true
+    syncShader()
   }
 
   function apply(kelvin) {
@@ -277,9 +280,23 @@ Item {
     // Even 6500K tints the screen, so off also restores the identity matrix.
     var target = Number(applyTarget)
     applyProcess.command = ["bash", "-c",
-      "hyprctl hyprsunset temperature " + target
+      "hyprctl hyprsunset temperature " + Model.hyprsunsetKelvin(target)
       + (target === Model.OFF_TEMP ? " && hyprctl hyprsunset identity" : "")]
     applyProcess.running = true
+    syncShader()
+  }
+
+  // The part below hyprsunset's 1000K. Also run on every check, to put the shader
+  // back after a config reload, or take it off when something else set the temperature.
+  function syncShader() {
+    if (!applyTarget) return
+    if (shaderProcess.running) {
+      shaderQueued = true
+      return
+    }
+    var step = externalHold ? 0 : Model.extraWarmStep(applyTarget)
+    shaderProcess.command = [shaderScript, String(step)]
+    shaderProcess.running = true
   }
 
   function handleProbe(text) {
@@ -306,6 +323,8 @@ Item {
       return
     }
 
+    // hyprsunset says 1000 for anything warmer, which the shader handles.
+    if (reported === Model.hyprsunsetKelvin(applyTarget)) reported = applyTarget
     actualTemp = reported
     if (reported === Model.FRESH_TEMP) {
       // hyprsunset just restarted, which drops whatever was set before.
@@ -436,6 +455,15 @@ Item {
         return
       }
       if (!probeProcess.running) probeProcess.running = true
+    }
+  }
+
+  Process {
+    id: shaderProcess
+    onExited: function() {
+      if (!root.shaderQueued) return
+      root.shaderQueued = false
+      root.syncShader()
     }
   }
 

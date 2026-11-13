@@ -1,7 +1,9 @@
 // Sun times and schedule rules for the night light. Plain functions with no QML,
 // so tests/model.test.js can run them under node.
 
-var MIN_TEMP = 1000
+var MIN_TEMP = 500
+var HYPRSUNSET_MIN = 1000 // hyprsunset refuses anything lower
+var EXTRA_STEPS = 10 // Shader strengths below HYPRSUNSET_MIN
 var MAX_TEMP = 4500
 var OFF_TEMP = 6500 // Reported while off, matching omarchy-toggle-nightlight
 var FRESH_TEMP = 6000 // hyprsunset's default; only ever reported right after it starts
@@ -56,6 +58,20 @@ function stepTime(text, deltaMinutes) {
 
 function clampTemp(kelvin) {
   return Math.max(MIN_TEMP, Math.min(MAX_TEMP, Math.round(Number(kelvin))))
+}
+
+// What hyprsunset is told. It stops at 1000K, so below that it stays there and
+// a screen shader (warm-shader.sh) takes away the rest of the green.
+function hyprsunsetKelvin(kelvin) {
+  return Math.max(HYPRSUNSET_MIN, kelvin)
+}
+
+// How much of that shader, from 0 (none) to EXTRA_STEPS (red only, at MIN_TEMP).
+// In steps, so a fade or ramp recompiles the shader a few times, not every frame.
+function extraWarmStep(kelvin) {
+  if (!(kelvin < HYPRSUNSET_MIN)) return 0
+  var share = (HYPRSUNSET_MIN - Math.max(MIN_TEMP, kelvin)) / (HYPRSUNSET_MIN - MIN_TEMP)
+  return Math.max(1, Math.round(share * EXTRA_STEPS))
 }
 
 // Bad or missing values fall back to the defaults, one field at a time.
@@ -331,6 +347,8 @@ if (typeof module !== "undefined") {
     parseTime: parseTime,
     stepTime: stepTime,
     clampTemp: clampTemp,
+    hyprsunsetKelvin: hyprsunsetKelvin,
+    extraWarmStep: extraWarmStep,
     normalizeSettings: normalizeSettings,
     parseCoordinates: parseCoordinates,
     weatherLocation: weatherLocation,

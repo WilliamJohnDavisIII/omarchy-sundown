@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.williamjohndavisiii.heliotrope",
   "name": "Sundown",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "William John Davis III",
   "description": "A night light that follows the sun. A bar icon and dropdown with a temperature slider, gradual sunset and sunrise changes, and a sun, custom, or manual schedule.",
   "kinds": [

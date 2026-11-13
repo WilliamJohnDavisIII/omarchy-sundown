@@ -33,6 +33,8 @@ With **Gradual** on, which is the default, Sun and Custom modes warm the screen 
 
 Flipping the switch during a schedule holds until the next scheduled change, even across restarts. Moving the slider while the night light is off previews that temperature for 10 seconds.
 
+`hyprsunset` stops at 1000K, and on some screens that is more orange than red. Below 1000K, Sundown leaves `hyprsunset` there and adds a Hyprland screen shader that takes away more green and blue, until 500K shows only red. A screen shader you already use, like a grayscale one, keeps working underneath. The shader goes away on a config reload and comes back within 15 seconds.
+
 `omarchy toggle nightlight` still works. It uses Omarchy's fixed 4000K, and that stays until the next scheduled change, even during a gradual change.
 
 ## Location
@@ -59,7 +61,7 @@ omarchy-shell $ID status
 omarchy-shell $ID on
 omarchy-shell $ID off
 omarchy-shell $ID toggle
-omarchy-shell $ID set 3000              # Save a temperature, from 1000 to 4500
+omarchy-shell $ID set 3000              # Save a temperature, from 500 to 4500
 omarchy-shell $ID schedule sun          # Or manual, or custom
 omarchy-shell $ID hours 21:00 07:00     # Custom on and off times
 omarchy-shell $ID location "52.52, 13.40"
