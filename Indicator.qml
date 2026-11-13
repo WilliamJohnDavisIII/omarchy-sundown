@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import qs.Commons
 import qs.Commons as Commons
+import "Registry.js" as Registry
 import qs.Ui
 
 // Optional: the night light icon as one of Omarchy's indicators instead of its
@@ -34,7 +35,7 @@ BarIndicator {
     running: !root.serviceReady
     repeat: true
     triggeredOnStart: true
-    onTriggered: if (root.bar && root.bar.shell) root.service = root.bar.shell.serviceFor("io.github.williamjohndavisiii.heliotrope")
+    onTriggered: root.service = (root.bar && root.bar.shell && root.bar.shell.serviceFor("io.github.williamjohndavisiii.heliotrope")) || Registry.service
   }
 
   // The panel counts as hovering the bar, so the peek stays open and the icon

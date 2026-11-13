@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import "Model.js" as Model
+import "Registry.js" as Registry
 
 // The single night light brain, one per shell however many bars are showing the
 // button. It owns the settings and the schedule, and is the only part of the
@@ -13,6 +14,9 @@ import "Model.js" as Model
 // noticed and stays put until the next scheduled change, even in mid-ramp.
 Item {
   id: root
+
+  Component.onCompleted: Registry.service = root
+  Component.onDestruction: if (Registry.service === root) Registry.service = null
 
   readonly property int minTemp: Model.MIN_TEMP
   readonly property int maxTemp: Model.MAX_TEMP

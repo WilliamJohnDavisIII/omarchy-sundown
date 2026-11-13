@@ -3,6 +3,7 @@ import Quickshell
 import qs.Ui
 import qs.Commons
 import qs.Commons as Commons
+import "Registry.js" as Registry
 
 // The bar icon and the night light dropdown. Service.qml does the work. With
 // showIcon off, Indicator.qml is the icon instead, and this takes up no room on
@@ -48,7 +49,7 @@ Panel {
     running: !root.serviceReady
     repeat: true
     triggeredOnStart: true
-    onTriggered: if (root.bar && root.bar.shell) root.service = root.bar.shell.serviceFor("io.github.williamjohndavisiii.heliotrope")
+    onTriggered: root.service = (root.bar && root.bar.shell && root.bar.shell.serviceFor("io.github.williamjohndavisiii.heliotrope")) || Registry.service
   }
 
   onOpenedChanged: {
