@@ -73,6 +73,11 @@ Item {
   property int queuedTarget: 0
   property real lastStartAttempt: 0
   property bool shaderQueued: false
+  // The step warm-shader.sh last applied, and the one it is applying now. -1
+  // until a run has worked, so the first check clears a shader an earlier shell
+  // left on the screen.
+  property int shaderStep: -1
+  property int shaderRunStep: 0
   readonly property string shaderScript: String(Qt.resolvedUrl("warm-shader.sh")).replace(/^file:\/\//, "")
 
   // Counts as on through the first, barely tinted part of a ramp, and shows where
@@ -290,15 +295,20 @@ Item {
     syncShader()
   }
 
-  // The part below hyprsunset's 1000K. Also run on every check, to put the shader
-  // back after a config reload, or take it off when something else set the temperature.
+  // The part below hyprsunset's 1000K. While the shader is on, also run on every
+  // check, to put it back after a config reload. Taking it off, including when
+  // something else set the temperature, takes one run; after that there is
+  // nothing of ours on the screen, so checks above 1000K skip the script.
   function syncShader() {
     if (!applyTarget) return
+    // Queued even at 0: the run in progress may be putting the shader on.
     if (shaderProcess.running) {
       shaderQueued = true
       return
     }
     var step = externalHold ? 0 : Model.extraWarmStep(applyTarget)
+    if (step === 0 && shaderStep === 0) return
+    shaderRunStep = step
     shaderProcess.command = [shaderScript, String(step)]
     shaderProcess.running = true
   }
@@ -464,7 +474,9 @@ Item {
 
   Process {
     id: shaderProcess
-    onExited: function() {
+    onExited: function(exitCode) {
+      // A run that failed is tried again at the next check.
+      root.shaderStep = exitCode === 0 ? root.shaderRunStep : -1
       if (!root.shaderQueued) return
       root.shaderQueued = false
       root.syncShader()
